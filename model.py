@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataset import Vocabulary
 
 # ══════════════════════════════════════════════════════════════════════
 #   CORE ATTENTION 
@@ -236,8 +237,8 @@ class Transformer(nn.Module):
         N:              int   = 4,
         num_heads:      int   = 8,
         d_ff:           int   = 1024,
-        dropout:        float = 0.2,
-        weights_id:     str   = None,
+        dropout:        float = 0.1,
+        weights_id:     str   = "1WslWWWpo_IUEornHD7qBhHKaQIBFXHIU",
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -261,11 +262,13 @@ class Transformer(nn.Module):
         self.spacy_de = None
         
         if weights_id:
-            self._load_from_drive(weights_id)
+            # We use 'best_model.pt' as the local filename for the autograder
+            self._load_from_drive(weights_id, local_path="best_model.pt")
 
-    def _load_from_drive(self, drive_id: Optional[str], local_path: str = "checkpoints/best_model_ours.pt"):
+    def _load_from_drive(self, drive_id: Optional[str], local_path: str = "best_model.pt"):
         """Autonomous download and loading of weights/vocab."""
         if not os.path.exists(local_path) and drive_id:
+            print(f"Downloading weights from Drive ID: {drive_id}...")
             gdown.download(id=drive_id, output=local_path, quiet=False)
         
         if os.path.exists(local_path):
@@ -277,15 +280,19 @@ class Transformer(nn.Module):
                 self.load_state_dict(ckpt)
             
             # Extract vocabs
-            from dataset import Vocabulary
             self.vocab_src = ckpt.get('vocab_src')
             self.vocab_tgt = ckpt.get('vocab_tgt')
-            print(f"Successfully loaded weights from {local_path}")
+            print(f"Successfully loaded weights and vocab from {local_path}")
             
+        # Autonomous Spacy Setup
         try:
             self.spacy_de = spacy.load("de_core_news_sm")
-        except:
-            pass
+        except OSError:
+            print("Downloading spacy model 'de_core_news_sm'...")
+            import subprocess
+            import sys
+            subprocess.run([sys.executable, "-m", "spacy", "download", "de_core_news_sm"], check=True)
+            self.spacy_de = spacy.load("de_core_news_sm")
 
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         x = self.pos_enc(self.source_embedding(src) * math.sqrt(self.d_model))
