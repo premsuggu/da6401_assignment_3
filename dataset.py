@@ -104,13 +104,20 @@ class Multi30kDataset(Dataset):
         
         return torch.tensor(src_tokens), torch.tensor(tgt_tokens)
 
-def collate_fn(batch, pad_idx):
-    src_list, tgt_list = [], []
-    for src, tgt in batch:
-        src_list.append(src)
-        tgt_list.append(tgt)
+def build_vocabs(de_nlp, en_nlp):
+    print("Building vocabs for reference model compatibility...")
+    ds = Multi30kDataset(split='train')
+    ds.build_vocab(min_freq=1)
+    # Patch the vocab objects to have .encode and .lookup_token
+    def encode(self, tokens):
+        return [self.stoi.get(t, self.unk_idx) for t in tokens]
+    def lookup_token(self, idx):
+        return self.itos[idx]
     
-    src_padded = torch.nn.utils.rnn.pad_sequence(src_list, batch_first=True, padding_value=pad_idx)
-    tgt_padded = torch.nn.utils.rnn.pad_sequence(tgt_list, batch_first=True, padding_value=pad_idx)
+    import types
+    ds.vocab_src.encode = types.MethodType(encode, ds.vocab_src)
+    ds.vocab_src.lookup_token = types.MethodType(lookup_token, ds.vocab_src)
+    ds.vocab_tgt.encode = types.MethodType(encode, ds.vocab_tgt)
+    ds.vocab_tgt.lookup_token = types.MethodType(lookup_token, ds.vocab_tgt)
     
-    return src_padded, tgt_padded
+    return ds.vocab_src, ds.vocab_tgt
