@@ -37,18 +37,15 @@ def scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Standard scaled dot-product attention implementation.
+    Standard scaled dot-product attention implementation matching reference.
     """
     d_k = Q.size(-1)
-    # Scaled dot-product
-    attn_logits = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
     
     if mask is not None:
-        # Masked values are set to a very large negative number
-        attn_logits = attn_logits.masked_fill(mask == True, -1e9)
+        scores = scores.masked_fill(mask == True, float('-inf'))
     
-    weights = F.softmax(attn_logits, dim=-1)
-    # In case of full masking (NaNs), zero them out
+    weights = F.softmax(scores, dim=-1)
     weights = torch.nan_to_num(weights, nan=0.0)
     
     output = torch.matmul(weights, V)
@@ -65,11 +62,10 @@ def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
 
 
 def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
-    """Creates a combined causal and padding mask for the target sequence."""
-    seq_len = tgt.size(1)
-    # Look-ahead (causal) mask
-    causal_mask = torch.triu(torch.ones((seq_len, seq_len), device=tgt.device), diagonal=1).bool()
-    # Padding mask
+    """Creates a combined causal and padding mask matching reference."""
+    batch_size, tgt_len = tgt.size()
+    # Reference uses triu(diagonal=1) for future positions
+    causal_mask = torch.triu(torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool), diagonal=1)
     padding_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
     return causal_mask.unsqueeze(0).unsqueeze(0) | padding_mask
 
@@ -80,7 +76,7 @@ def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-Head Attention using simple naming conventions.
+    Multi-Head Attention aligned with reference architecture.
     """
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
         super().__init__()
@@ -90,7 +86,6 @@ class MultiHeadAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
 
-        # No bias in projection layers to match reference model's weight structure
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
         self.k_proj = nn.Linear(d_model, d_model, bias=False)
         self.v_proj = nn.Linear(d_model, d_model, bias=False)
@@ -102,19 +97,17 @@ class MultiHeadAttention(nn.Module):
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch_size = query.size(0)
         
-        # 1. Linear Projections & Split Heads
-        # (B, S, D) -> (B, S, H, d_k) -> (B, H, S, d_k)
         q = self.q_proj(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         k = self.k_proj(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         v = self.v_proj(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         
-        # 2. Scaled Dot-Product Attention
         attn_out, _ = scaled_dot_product_attention(q, k, v, mask=mask)
         
-        # 3. Concatenation & Output Projection
-        # (B, H, S, d_k) -> (B, S, H, d_k) -> (B, S, D)
+        # Apply dropout to attn_out BEFORE concatenation (as in reference)
+        attn_out = self.dropout(attn_out)
+        
         attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
-        return self.out_proj(self.dropout(attn_out))
+        return self.out_proj(attn_out)
 
 
 class PositionalEncoding(nn.Module):
@@ -238,7 +231,7 @@ class Transformer(nn.Module):
         num_heads:      int   = 8,
         d_ff:           int   = 1024,
         dropout:        float = 0.1,
-        weights_id:     str   = "1WslWWWpo_IUEornHD7qBhHKaQIBFXHIU",
+        weights_id:     str   = "1WslWWWpo_IUEornHD7qBhHKaQIBFXHIU",  
     ) -> None:
         super().__init__()
         self.d_model = d_model
@@ -254,7 +247,10 @@ class Transformer(nn.Module):
         dec_layer = DecoderLayer(d_model, num_heads, d_ff, dropout)
         self.decoder_stack = Decoder(dec_layer, N)
         
-        self.output_layer = nn.Linear(d_model, tgt_vocab_size)
+        self.output_layer = nn.Linear(d_model, tgt_vocab_size, bias=True)
+        
+        # --- Weight Tying ---
+        self.output_layer.weight = self.target_embedding.weight
         
         # Autonomous Setup
         self.vocab_src = None
