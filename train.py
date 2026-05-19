@@ -47,14 +47,10 @@ class LabelSmoothingLoss(nn.Module):
             logits : shape [batch * tgt_len, vocab_size]
             target : shape [batch * tgt_len]
         """
-        # logits: (N, C), target: (N)
         assert logits.size(1) == self.vocab_size
         
-        # Create smoothed labels
         true_dist = logits.data.clone()
-        true_dist.fill_(self.smoothing / (self.vocab_size - 2)) # -2 for pad and target? No, usually -1
-        # Actually, the paper says "over all classes". 
-        # But we must ensure pad_idx gets 0.
+        true_dist.fill_(self.smoothing / (self.vocab_size - 2))
         
         true_dist.scatter_(1, target.data.unsqueeze(1), self.confidence)
         true_dist[:, self.pad_idx] = 0
@@ -90,34 +86,24 @@ def run_epoch(
         
     total_loss = 0
     total_tokens = 0
-    
-    # We assume data_iter yields (src, tgt) batches
-    # tgt is [batch, tgt_len], where tgt_len includes <sos> and <eos>
-    # Input to decoder: tgt[:, :-1]
-    # Labels for loss: tgt[:, 1:]
-    
-    for i, (src, tgt) in enumerate(data_iter):
+
+    for src, tgt in data_iter:
         src = src.to(device)
         tgt = tgt.to(device)
         
-        # Shift target for training
         tgt_input = tgt[:, :-1]
         tgt_y = tgt[:, 1:]
         
-        # Create masks
-        src_mask = make_src_mask(src, pad_idx=1) # pad_idx=1 is default
+        src_mask = make_src_mask(src, pad_idx=1)
         tgt_mask = make_tgt_mask(tgt_input, pad_idx=1)
         
-        # Forward pass
         if is_train:
             optimizer.zero_grad()
             logits = model(src, tgt_input, src_mask, tgt_mask)
-            
-            # Compute loss
-            # logits: [batch, tgt_len-1, vocab_size]
-            # tgt_y: [batch, tgt_len-1]
-            loss = loss_fn(logits.contiguous().view(-1, logits.size(-1)), 
-                           tgt_y.contiguous().view(-1))
+            loss = loss_fn(
+                logits.contiguous().view(-1, logits.size(-1)),
+                tgt_y.contiguous().view(-1),
+            )
             
             loss.backward()
             optimizer.step()
@@ -126,14 +112,14 @@ def run_epoch(
         else:
             with torch.no_grad():
                 logits = model(src, tgt_input, src_mask, tgt_mask)
-                loss = loss_fn(logits.contiguous().view(-1, logits.size(-1)), 
-                               tgt_y.contiguous().view(-1))
+                loss = loss_fn(
+                    logits.contiguous().view(-1, logits.size(-1)),
+                    tgt_y.contiguous().view(-1),
+                )
         
         total_loss += loss.item()
-        # Count non-pad tokens for averaging if needed, but LabelSmoothingLoss reduction is 'sum'
-        # So we should probably divide by the number of non-pad tokens at the end.
-        non_pad_tokens = (tgt_y != 1).sum().item()
-        total_tokens += non_pad_tokens
+        token_count = (tgt_y != 1).sum().item()
+        total_tokens += token_count
 
     return total_loss / total_tokens if total_tokens > 0 else 0.0
 
@@ -158,27 +144,19 @@ def greedy_decode(
     src = src.to(device)
     src_mask = src_mask.to(device)
     
-    # 1. Encode source
     memory = model.encode(src, src_mask)
     
-    # 2. Iteratively decode
-    # ys: [1, seq_len]
     ys = torch.ones(1, 1).fill_(start_symbol).type_as(src.data)
     
-    for i in range(max_len - 1):
-        # Create target mask for current ys
+    for _ in range(max_len - 1):
         tgt_mask = make_tgt_mask(ys, pad_idx=1)
         
-        # Decoder forward pass
         out = model.decode(memory, src_mask, ys, tgt_mask)
         
-        # Get last token's logits and take argmax
-        # out: [1, current_len, vocab_size]
         prob = out[:, -1]
         _, next_word = torch.max(prob, dim=1)
         next_word = next_word.item()
         
-        # Append to ys
         ys = torch.cat([ys, torch.ones(1, 1).type_as(src.data).fill_(next_word)], dim=1)
         
         if next_word == end_symbol:
@@ -207,28 +185,20 @@ def evaluate_bleu(
     targets = []
     outputs = []
     
-    # Special tokens
-    # Assuming Vocabulary class has itos
-    # Index 1: <pad>, 2: <sos>, 3: <eos>
     SOS_IDX = 2
     EOS_IDX = 3
     PAD_IDX = 1
     
     with torch.no_grad():
-        for i, (src, tgt) in enumerate(test_dataloader):
-            # Process each sentence in the batch
-            for j in range(src.size(0)):
-                s = src[j].unsqueeze(0).to(device)
-                t = tgt[j]
+        for batch_idx, (src, tgt) in enumerate(test_dataloader):
+            for sample_idx in range(src.size(0)):
+                src_item = src[sample_idx].unsqueeze(0).to(device)
+                tgt_item = tgt[sample_idx]
                 
-                src_mask = make_src_mask(s, pad_idx=PAD_IDX)
+                src_mask = make_src_mask(src_item, pad_idx=PAD_IDX)
                 
-                # Greedy decode
-                # ys: [1, seq_len]
-                ys = greedy_decode(model, s, src_mask, max_len, SOS_IDX, EOS_IDX, device)
+                ys = greedy_decode(model, src_item, src_mask, max_len, SOS_IDX, EOS_IDX, device)
                 
-                # Convert back to tokens, excluding special tokens
-                # Candidate
                 candidate_tokens = []
                 for idx in ys[0].tolist():
                     if idx in [SOS_IDX, EOS_IDX, PAD_IDX]:
@@ -236,19 +206,16 @@ def evaluate_bleu(
                     candidate_tokens.append(tgt_vocab.itos[idx])
                 outputs.append(candidate_tokens)
                 
-                # Reference
                 reference_tokens = []
-                for idx in t.tolist():
+                for idx in tgt_item.tolist():
                     if idx in [SOS_IDX, EOS_IDX, PAD_IDX]:
                         continue
                     reference_tokens.append(tgt_vocab.itos[idx])
-                targets.append([reference_tokens]) # bleu_score expects list of references
+                targets.append([reference_tokens])
             
-            if (i+1) % 10 == 0:
-                print(f"  - Processed {i+1} batches...")
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  - Processed {batch_idx + 1} batches...")
 
-    # Compute BLEU
-    # Multiply by 100 as per common practice (0-100 range)
     score = bleu_score(outputs, targets)
     return score * 100
 
@@ -285,7 +252,6 @@ def save_checkpoint(
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
         'model_config': model_config,
-        # Bundle vocabularies here
         'vocab_src': vocab_src,
         'vocab_tgt': vocab_tgt
     }
@@ -329,9 +295,8 @@ def run_training_experiment() -> None:
     """
     Set up and run the full training experiment.
     """
-    # 1. Hyperparameters
     config = {
-        "d_model": 256, # Smaller for faster training on CPU/limited GPU
+        "d_model": 256,
         "N": 3,
         "num_heads": 8,
         "d_ff": 512,
@@ -340,16 +305,14 @@ def run_training_experiment() -> None:
         "num_epochs": 10,
         "warmup_steps": 4000,
         "smoothing": 0.1,
-        "learning_rate": 1.0, # Base LR for Noam
+        "learning_rate": 1.0,
     }
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
     
-    # 2. Init W&B
     # wandb.init(project="da6401-a3", config=config)
     
-    # 3. Build dataset / vocabs
     print("Loading datasets...")
     train_ds = Multi30kDataset(split='train')
     train_ds.build_vocab()
@@ -364,15 +327,13 @@ def run_training_experiment() -> None:
     
     PAD_IDX = train_ds.PAD_IDX
     
-    # 4. DataLoaders
     train_loader = DataLoader(train_ds, batch_size=config["batch_size"], 
                               shuffle=True, collate_fn=partial(collate_fn, pad_idx=PAD_IDX))
     val_loader   = DataLoader(val_ds, batch_size=config["batch_size"], 
                               shuffle=False, collate_fn=partial(collate_fn, pad_idx=PAD_IDX))
-    test_loader  = DataLoader(test_ds, batch_size=1, # Usually 1 for greedy decoding BLEU
+    test_loader  = DataLoader(test_ds, batch_size=1,
                               shuffle=False, collate_fn=partial(collate_fn, pad_idx=PAD_IDX))
     
-    # 5. Model
     model = Transformer(
         src_vocab_size=len(train_ds.vocab_src),
         tgt_vocab_size=len(train_ds.vocab_tgt),
@@ -383,14 +344,11 @@ def run_training_experiment() -> None:
         dropout=config["dropout"]
     ).to(device)
     
-    # 6. Optimizer & Scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"], betas=(0.9, 0.98), eps=1e-9)
     scheduler = NoamScheduler(optimizer, d_model=config["d_model"], warmup_steps=config["warmup_steps"])
     
-    # 7. Loss
     loss_fn = LabelSmoothingLoss(vocab_size=len(train_ds.vocab_tgt), pad_idx=PAD_IDX, smoothing=config["smoothing"])
     
-    # 8. Training loop
     best_val_loss = float('inf')
     
     for epoch in range(config["num_epochs"]):
@@ -402,20 +360,15 @@ def run_training_experiment() -> None:
         val_loss = run_epoch(val_loader, model, loss_fn, None, None, epoch, is_train=False, device=device)
         print(f"  Val Loss:   {val_loss:.4f}")
         
-        # wandb.log({"train_loss": train_loss, "val_loss": val_loss, "epoch": epoch})
-        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, scheduler, epoch, path="best_model.pt", 
                             vocab_src=train_ds.vocab_src, vocab_tgt=train_ds.vocab_tgt)
             
-    # 9. Final BLEU
     print("\nEvaluating BLEU on test set...")
     load_checkpoint("best_model.pt", model)
     bleu = evaluate_bleu(model, test_loader, train_ds.vocab_tgt, device=device)
     print(f"Final BLEU: {bleu:.2f}")
-    # wandb.log({"test_bleu": bleu})
-    # wandb.finish()
 
 
 if __name__ == "__main__":

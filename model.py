@@ -14,13 +14,13 @@ AUTOGRADER CONTRACT (DO NOT MODIFY SIGNATURES):
   └─────────────────────────────────────────────────────────────────┘
 """
 
-import math
 import copy
+import math
 import os
-import gdown
-import spacy
 from typing import Optional, Tuple
 
+import gdown
+import spacy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -39,8 +39,8 @@ def scaled_dot_product_attention(
     """
     Standard scaled dot-product attention implementation matching reference.
     """
-    d_k = Q.size(-1)
-    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+    head_dim = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(head_dim)
     
     if mask is not None:
         scores = scores.masked_fill(mask == True, float('-inf'))
@@ -63,8 +63,7 @@ def make_src_mask(src: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
 
 def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = 1) -> torch.Tensor:
     """Creates a combined causal and padding mask matching reference."""
-    batch_size, tgt_len = tgt.size()
-    # Reference uses triu(diagonal=1) for future positions
+    _, tgt_len = tgt.size()
     causal_mask = torch.triu(torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool), diagonal=1)
     padding_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
     return causal_mask.unsqueeze(0).unsqueeze(0) | padding_mask
@@ -97,13 +96,12 @@ class MultiHeadAttention(nn.Module):
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         batch_size = query.size(0)
         
-        q = self.q_proj(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
-        k = self.k_proj(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
-        v = self.v_proj(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        q_heads = self.q_proj(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        k_heads = self.k_proj(key).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        v_heads = self.v_proj(value).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         
-        attn_out, _ = scaled_dot_product_attention(q, k, v, mask=mask)
+        attn_out, _ = scaled_dot_product_attention(q_heads, k_heads, v_heads, mask=mask)
         
-        # Apply dropout to attn_out BEFORE concatenation (as in reference)
         attn_out = self.dropout(attn_out)
         
         attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
@@ -156,9 +154,7 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
-        # Self-attention + Add & Norm
         x = self.attn_norm(x + self.dropout(self.self_attention(x, x, x, src_mask)))
-        # Feed-forward + Add & Norm
         x = self.ffn_norm(x + self.dropout(self.feed_forward(x)))
         return x
 
@@ -178,11 +174,8 @@ class DecoderLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, memory: torch.Tensor, 
                 src_mask: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
-        # 1. Self-Attention
         x = self.attn_norm(x + self.dropout(self.self_attention(x, x, x, tgt_mask)))
-        # 2. Cross-Attention
         x = self.cross_norm(x + self.dropout(self.encoder_attention(x, memory, memory, src_mask)))
-        # 3. Feed-Forward
         x = self.ffn_norm(x + self.dropout(self.feed_forward(x)))
         return x
 
@@ -236,7 +229,6 @@ class Transformer(nn.Module):
         super().__init__()
         self.d_model = d_model
         
-        # Architecture components
         self.source_embedding = nn.Embedding(src_vocab_size, d_model)
         self.target_embedding = nn.Embedding(tgt_vocab_size, d_model)
         self.pos_enc = PositionalEncoding(d_model, dropout)
@@ -249,10 +241,8 @@ class Transformer(nn.Module):
         
         self.output_layer = nn.Linear(d_model, tgt_vocab_size, bias=True)
         
-        # --- Weight Tying ---
         self.output_layer.weight = self.target_embedding.weight
         
-        # Autonomous Setup
         self.vocab_src = None
         self.vocab_tgt = None
         self.spacy_de = None
@@ -268,19 +258,16 @@ class Transformer(nn.Module):
             gdown.download(id=drive_id, output=local_path, quiet=False)
         
         if os.path.exists(local_path):
-            ckpt = torch.load(local_path, map_location='cpu', weights_only=False)
-            # Extract weights
-            if 'model_state_dict' in ckpt:
-                self.load_state_dict(ckpt['model_state_dict'])
+            checkpoint = torch.load(local_path, map_location='cpu', weights_only=False)
+            if 'model_state_dict' in checkpoint:
+                self.load_state_dict(checkpoint['model_state_dict'])
             else:
-                self.load_state_dict(ckpt)
+                self.load_state_dict(checkpoint)
             
-            # Extract vocabs
-            self.vocab_src = ckpt.get('vocab_src')
-            self.vocab_tgt = ckpt.get('vocab_tgt')
+            self.vocab_src = checkpoint.get('vocab_src')
+            self.vocab_tgt = checkpoint.get('vocab_tgt')
             print(f"Successfully loaded weights and vocab from {local_path}")
             
-        # Autonomous Spacy Setup
         try:
             self.spacy_de = spacy.load("de_core_news_sm")
         except OSError:
@@ -291,14 +278,16 @@ class Transformer(nn.Module):
             self.spacy_de = spacy.load("de_core_news_sm")
 
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
-        x = self.pos_enc(self.source_embedding(src) * math.sqrt(self.d_model))
-        return self.encoder_stack(x, src_mask)
+        src_embed = self.source_embedding(src) * math.sqrt(self.d_model)
+        src_embed = self.pos_enc(src_embed)
+        return self.encoder_stack(src_embed, src_mask)
 
     def decode(self, memory: torch.Tensor, src_mask: torch.Tensor, 
                tgt: torch.Tensor, tgt_mask: torch.Tensor) -> torch.Tensor:
-        x = self.pos_enc(self.target_embedding(tgt) * math.sqrt(self.d_model))
-        x = self.decoder_stack(x, memory, src_mask, tgt_mask)
-        return self.output_layer(x)
+        tgt_embed = self.target_embedding(tgt) * math.sqrt(self.d_model)
+        tgt_embed = self.pos_enc(tgt_embed)
+        decoded = self.decoder_stack(tgt_embed, memory, src_mask, tgt_mask)
+        return self.output_layer(decoded)
 
     def forward(self, src, tgt, src_mask, tgt_mask) -> torch.Tensor:
         memory = self.encode(src, src_mask)
@@ -312,13 +301,11 @@ class Transformer(nn.Module):
         if not self.spacy_de or not self.vocab_src or not self.vocab_tgt:
             return "Error: Model not fully initialized with weights and vocab."
 
-        # Tokenize & Numericalize
         tokens = [tok.text.lower() for tok in self.spacy_de.tokenizer(german_sentence)]
-        src_ids = [2] + [self.vocab_src[t] for t in tokens] + [3] # SOS=2, EOS=3
+        src_ids = [2] + [self.vocab_src[token] for token in tokens] + [3]
         src_tensor = torch.tensor(src_ids).unsqueeze(0).to(device)
         src_mask = make_src_mask(src_tensor)
         
-        # Decoding
         with torch.no_grad():
             memory = self.encode(src_tensor, src_mask)
             ys = torch.ones(1, 1).fill_(2).type_as(src_tensor.data)
@@ -328,8 +315,8 @@ class Transformer(nn.Module):
                 logits = self.decode(memory, src_mask, ys, tgt_mask)
                 next_word = logits[0, -1].argmax().item()
                 ys = torch.cat([ys, torch.ones(1, 1).type_as(src_tensor.data).fill_(next_word)], dim=1)
-                if next_word == 3: break
+                if next_word == 3:
+                    break
         
-        # Detokenize
-        res = [self.vocab_tgt.itos[idx] for idx in ys[0].tolist() if idx not in [2, 3, 1]]
-        return " ".join(res)
+        out_tokens = [self.vocab_tgt.itos[idx] for idx in ys[0].tolist() if idx not in [2, 3, 1]]
+        return " ".join(out_tokens)

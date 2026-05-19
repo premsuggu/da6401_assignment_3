@@ -36,19 +36,19 @@ class NoamScheduler(LRScheduler):
         """
         Compute the Noam scaling factor for the current step.
         """
-        # Step starts at 1
         step = self.last_epoch + 1
-        if step == 0: # Handle edge case if get_lr is called before first step
+        if step == 0:
             step = 1
-        scale = (self.d_model ** -0.5) * min(step ** -0.5, step * (self.warmup_steps ** -1.5))
-        return scale
+        warmup_scale = step * (self.warmup_steps ** -1.5)
+        decay_scale = step ** -0.5
+        return (self.d_model ** -0.5) * min(decay_scale, warmup_scale)
 
     def get_lr(self) -> list[float]:
         """
         Compute learning rates for every param group.
         """
-        scale = self._get_lr_scale()
-        return [base_lr * scale for base_lr in self.base_lrs]
+        scale_now = self._get_lr_scale()
+        return [base_lr * scale_now for base_lr in self.base_lrs]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -72,8 +72,8 @@ def get_lr_history(
         list[float]: LR value at each step (length == total_steps).
     """
     dummy_model = torch.nn.Linear(1, 1)
-    optimizer   = optim.Adam(dummy_model.parameters(), lr=1.0)
-    scheduler   = NoamScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
+    optimizer = optim.Adam(dummy_model.parameters(), lr=1.0)
+    scheduler = NoamScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)
 
     history = []
     for _ in range(total_steps):
@@ -91,9 +91,9 @@ def get_lr_history(
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
 
-    D_MODEL      = 512
+    D_MODEL = 512
     WARMUP_STEPS = 4000
-    TOTAL_STEPS  = 20_000
+    TOTAL_STEPS = 20_000
 
     lrs = get_lr_history(D_MODEL, WARMUP_STEPS, TOTAL_STEPS)
 

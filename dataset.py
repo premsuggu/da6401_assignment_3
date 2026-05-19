@@ -2,8 +2,6 @@ import torch
 from torch.utils.data import Dataset
 from datasets import load_dataset
 import spacy
-from collections import Counter
-import os
 import pickle
 
 class Vocabulary:
@@ -19,8 +17,9 @@ class Vocabulary:
         return self.stoi.get(token, self.unk_idx)
 
     def save(self, path):
-        with open(path, 'wb') as f:
-            pickle.dump({'itos': self.itos, 'stoi': self.stoi, 'unk_idx': self.unk_idx}, f)
+        payload = {'itos': self.itos, 'stoi': self.stoi, 'unk_idx': self.unk_idx}
+        with open(path, 'wb') as file_obj:
+            pickle.dump(payload, file_obj)
 
     @classmethod
     def load_from_original(cls, path):
@@ -34,13 +33,13 @@ class Vocabulary:
 
     @classmethod
     def load(cls, path):
-        with open(path, 'rb') as f:
-            data = pickle.load(f)
-        obj = cls()
-        obj.itos = data['itos']
-        obj.stoi = data['stoi']
-        obj.unk_idx = data['unk_idx']
-        return obj
+        with open(path, 'rb') as file_obj:
+            saved_data = pickle.load(file_obj)
+        vocab = cls()
+        vocab.itos = saved_data['itos']
+        vocab.stoi = saved_data['stoi']
+        vocab.unk_idx = saved_data['unk_idx']
+        return vocab
 
 class Multi30kDataset(Dataset):
     def __init__(self, split='train', src_lang='de', tgt_lang='en'):
@@ -60,9 +59,9 @@ class Multi30kDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx):
-        item = self.dataset[idx]
-        src_text = item[self.src_lang]
-        tgt_text = item[self.tgt_lang]
+        sample = self.dataset[idx]
+        src_text = sample[self.src_lang]
+        tgt_text = sample[self.tgt_lang]
         src_tokens = [self.SOS_IDX] + [self.vocab_src[token] for token in self.tokenizer_src(src_text)] + [self.EOS_IDX]
         tgt_tokens = [self.SOS_IDX] + [self.vocab_tgt[token] for token in self.tokenizer_tgt(tgt_text)] + [self.EOS_IDX]
         return torch.tensor(src_tokens), torch.tensor(tgt_tokens)
@@ -71,10 +70,10 @@ def build_vocabs(de_nlp, en_nlp):
     return None, None
 
 def collate_fn(batch, pad_idx):
-    src_list, tgt_list = [], []
+    src_items, tgt_items = [], []
     for src, tgt in batch:
-        src_list.append(src)
-        tgt_list.append(tgt)
-    src_padded = torch.nn.utils.rnn.pad_sequence(src_list, batch_first=True, padding_value=pad_idx)
-    tgt_padded = torch.nn.utils.rnn.pad_sequence(tgt_list, batch_first=True, padding_value=pad_idx)
+        src_items.append(src)
+        tgt_items.append(tgt)
+    src_padded = torch.nn.utils.rnn.pad_sequence(src_items, batch_first=True, padding_value=pad_idx)
+    tgt_padded = torch.nn.utils.rnn.pad_sequence(tgt_items, batch_first=True, padding_value=pad_idx)
     return src_padded, tgt_padded
